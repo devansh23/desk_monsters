@@ -1,5 +1,163 @@
-const path = require('path');
-const Pet = require('./logic/petLogic');
+// Initialization will happen when DOM is loaded
+document.addEventListener('DOMContentLoaded', () => {
+  // Rest of initialization code will be here
+  initializeGame();
+});
+
+// Main initialization function
+function initializeGame() {
+  try {
+    // Code to initialize the game
+    const isPip = window.location.pathname.endsWith('pip.html');
+    const canvasId = isPip ? 'pet-sprite-pip' : 'pet-sprite';
+    
+    // Initialize pet
+    let pet;
+    try {
+      // Try to dynamically load the Pet class
+      const script = document.createElement('script');
+      script.src = 'logic/petLogic.js';
+      script.onload = () => {
+        if (window.Pet) {
+          pet = new window.Pet();
+          initializeAnimator(pet, canvasId, isPip);
+        } else {
+          console.error('Pet class not found after loading script');
+        }
+      };
+      script.onerror = (err) => {
+        console.error('Error loading Pet script:', err);
+      };
+      document.head.appendChild(script);
+    } catch (err) {
+      console.error('Failed to initialize Pet:', err);
+    }
+  } catch (error) {
+    console.error('Failed to initialize game:', error);
+  }
+}
+
+// Function to initialize the animator once Pet is loaded
+function initializeAnimator(pet, canvasId, isPip) {
+  // Initialize animator
+  const animator = new SpriteAnimator(canvasId);
+  animator.start();
+
+  // Set initial emotion
+  animator.setEmotion(pet.getEmotionalState()).catch(console.error);
+
+  // Create action buttons
+  createButtons(pet, animator, isPip);
+
+  // Initial metrics display
+  updateMetricsDisplay(pet.getMetrics(), isPip);
+
+  // Listen for metric updates
+  window.addEventListener('pet-metrics-update', (event) => {
+    updateMetricsDisplay(event.detail, isPip);
+    animator.setEmotion(event.detail.emotion).catch(console.error);
+    // Sync state with other windows
+    if (window.electron) {
+      window.electron.ipcRenderer.send('update-pet-state', {
+        metrics: event.detail,
+        emotion: event.detail.emotion
+      });
+    }
+  });
+
+  // Listen for state updates from other windows
+  if (window.electron) {
+    window.electron.ipcRenderer.on('pet-state-update', (state) => {
+      if (state.action) {
+        animator.setAction(state.action).catch(console.error);
+      }
+      if (state.metrics) {
+        updateMetricsDisplay(state.metrics, isPip);
+      }
+      if (state.emotion) {
+        animator.setEmotion(state.emotion).catch(console.error);
+      }
+    });
+  }
+}
+
+// Update metrics display function
+function updateMetricsDisplay(metrics, isPip) {
+  const metricsContainer = document.getElementById(isPip ? 'metrics-pip' : 'metrics');
+  if (!metricsContainer) return;
+  
+  const bars = [
+    { name: 'Hunger', value: metrics.hunger },
+    { name: 'Happiness', value: metrics.happiness },
+    { name: 'Energy', value: metrics.energy },
+    { name: 'Health', value: metrics.health },
+    { name: 'Love', value: metrics.love }
+  ];
+
+  metricsContainer.innerHTML = bars.map(bar => `
+    <div style="margin-bottom: ${isPip ? '2px' : '5px'};">
+      <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
+        <span>${bar.name}</span>
+        <span>${Math.floor(bar.value)}%</span>
+      </div>
+      <div class="metric-bar">
+        <div class="metric-bar-fill" style="width: ${bar.value}%; background: ${
+          bar.value > 60 ? '#4CAF50' : 
+          bar.value > 30 ? '#FFC107' : 
+          '#F44336'
+        };"></div>
+      </div>
+    </div>
+  `).join('') + `
+    <div style="margin-top: ${isPip ? '4px' : '10px'}; text-align: center;">
+      Age: ${Math.floor(metrics.age)} days
+    </div>
+  `;
+}
+
+// Create buttons function
+function createButtons(pet, animator, isPip) {
+  const actions = [
+    { name: 'Feed', method: 'feed' },
+    { name: 'Play', method: 'play' },
+    { name: 'Clean', method: 'clean' },
+    { name: 'Sleep', method: 'sleep' },
+    { name: 'Teach', method: 'teach' },
+    { name: 'MYOB', method: 'myob' }
+  ];
+
+  const buttonsContainer = document.getElementById(isPip ? 'buttons-pip' : 'buttons');
+  if (!buttonsContainer) return;
+  
+  actions.forEach(({ name, method }) => {
+    const button = document.createElement('button');
+    button.textContent = name;
+    if (!isPip) {
+      button.style.padding = '10px';
+      button.style.borderRadius = '5px';
+      button.style.border = '1px solid #ccc';
+      button.style.cursor = 'pointer';
+    }
+    button.onclick = async () => {
+      const action = pet[method]();
+      if (action) {
+        try {
+          await animator.setAction(action);
+          // Sync state with other windows
+          if (window.electron) {
+            window.electron.ipcRenderer.send('update-pet-state', {
+              action,
+              metrics: pet.getMetrics()
+            });
+          }
+        } catch (error) {
+          console.error('Error during action animation:', error);
+        }
+      }
+    };
+    buttonsContainer.appendChild(button);
+  });
+}
 
 class SpriteAnimator {
   constructor(canvasId) {
@@ -28,9 +186,21 @@ class SpriteAnimator {
     this.totalFrames = 29;
     this.rows = 5;
     
-    // Fixed dimensions for the sprite
-    this.displayWidth = 200;
-    this.displayHeight = 200;
+    // Store canvas ID to determine if we're in PiP mode
+    this.canvasId = canvasId;
+    this.isPip = canvasId === 'pet-sprite-pip';
+    
+    // Adjust display size for PiP
+    if (this.isPip) {
+      this.displayWidth = 150;
+      this.displayHeight = 150;
+      this.canvas.width = 150;
+      this.canvas.height = 150;
+    } else {
+      // Fixed dimensions for the sprite
+      this.displayWidth = 200;
+      this.displayHeight = 200;
+    }
     
     // Calculate sprite positions
     this.drawX = (this.canvas.width - this.displayWidth) / 2;
@@ -59,22 +229,20 @@ class SpriteAnimator {
     this.actionStartFrame = 0;
     
     // Define available actions and emotions with proper path resolution
-    const spritePath = path.join(__dirname, '..', 'assets', 'sprites').replace('app.asar', 'app.asar.unpacked');
-    console.log('Sprite path:', spritePath);
-    
+    // Use relative paths that work in browser
     this.actions = {
-      cleaning: { sheetPath: path.join(spritePath, 'cleaning.png') },
-      eating: { sheetPath: path.join(spritePath, 'eating.png') },
-      learning: { sheetPath: path.join(spritePath, 'learning.png') },
-      myob: { sheetPath: path.join(spritePath, 'myob.png') },
-      playing: { sheetPath: path.join(spritePath, 'playing.png') },
-      sleeping: { sheetPath: path.join(spritePath, 'sleeping.png') }
+      cleaning: { sheetPath: '../assets/sprites/cleaning.png' },
+      eating: { sheetPath: '../assets/sprites/eating.png' },
+      learning: { sheetPath: '../assets/sprites/learning.png' },
+      myob: { sheetPath: '../assets/sprites/myob.png' },
+      playing: { sheetPath: '../assets/sprites/playing.png' },
+      sleeping: { sheetPath: '../assets/sprites/sleeping.png' }
     };
     
     this.emotions = {
-      happy: { sheetPath: path.join(spritePath, 'happy.png') },
-      neutral: { sheetPath: path.join(spritePath, 'neutral.png') },
-      sad: { sheetPath: path.join(spritePath, 'sad.png') }
+      happy: { sheetPath: '../assets/sprites/happy.png' },
+      neutral: { sheetPath: '../assets/sprites/neutral.png' },
+      sad: { sheetPath: '../assets/sprites/sad.png' }
     };
 
     this.currentAction = null;
@@ -182,8 +350,13 @@ class SpriteAnimator {
   }
 
   getFramePosition(frameNumber) {
+    // Add special handling for the last row
     const row = Math.floor(frameNumber / this.framesPerRow);
     const col = frameNumber % this.framesPerRow;
+    // If we're on the last row and beyond the last valid frame
+    if (row === this.rows - 1 && col >= this.totalFrames % this.framesPerRow) {
+        return { row: 0, col: 0 }; // Reset to first frame
+    }
     return { row, col };
   }
 
@@ -193,7 +366,13 @@ class SpriteAnimator {
     if (!this.lastFrameTime) this.lastFrameTime = timestamp;
 
     if (timestamp - this.lastFrameTime >= this.animationSpeed) {
+      const oldFrame = this.currentFrame;
       this.currentFrame = (this.currentFrame + 1) % this.totalFrames;
+      
+      // Debug logging for frame transitions
+      const oldPos = this.getFramePosition(oldFrame);
+      const newPos = this.getFramePosition(this.currentFrame);
+      // console.log(`Frame transition: ${oldFrame}(${oldPos.row},${oldPos.col}) -> ${this.currentFrame}(${newPos.row},${newPos.col})`);
       
       if (this.isActionPlaying) {
         this.actionStartFrame++;
@@ -262,126 +441,4 @@ class SpriteAnimator {
   stop() {
     this.isAnimating = false;
   }
-}
-
-// Initialize when DOM is loaded
-console.log('Setting up DOM content loaded listener');
-document.addEventListener('DOMContentLoaded', async () => {
-  console.log('DOM content loaded, initializing game');
-  try {
-    // Create game container
-    const gameContainer = document.createElement('div');
-    gameContainer.style.display = 'flex';
-    gameContainer.style.flexDirection = 'column';
-    gameContainer.style.alignItems = 'center';
-    gameContainer.style.padding = '20px';
-    document.body.appendChild(gameContainer);
-
-    // Create canvas
-    const canvas = document.createElement('canvas');
-    canvas.id = 'pet-sprite';
-    canvas.width = 400;  // Increased canvas size
-    canvas.height = 400; // Increased canvas size
-    canvas.style.border = '2px solid #ccc';
-    canvas.style.borderRadius = '10px';
-    canvas.style.marginBottom = '20px';
-    canvas.style.background = 'white'; // Add white background
-    gameContainer.appendChild(canvas);
-
-    // Create metrics display
-    const metricsDiv = document.createElement('div');
-    metricsDiv.style.marginBottom = '20px';
-    metricsDiv.style.width = '300px';
-    gameContainer.appendChild(metricsDiv);
-
-    // Create action buttons container
-    const buttonsDiv = document.createElement('div');
-    buttonsDiv.style.display = 'grid';
-    buttonsDiv.style.gridTemplateColumns = 'repeat(3, 1fr)';
-    buttonsDiv.style.gap = '10px';
-    buttonsDiv.style.width = '300px';
-    gameContainer.appendChild(buttonsDiv);
-
-    // Initialize pet and animator
-    const pet = new Pet();
-    const animator = new SpriteAnimator('pet-sprite');
-    animator.start();
-
-    // Set initial emotion
-    await animator.setEmotion(pet.getEmotionalState());
-
-    // Create action buttons
-    const actions = [
-      { name: 'Feed', method: 'feed' },
-      { name: 'Play', method: 'play' },
-      { name: 'Clean', method: 'clean' },
-      { name: 'Sleep', method: 'sleep' },
-      { name: 'Teach', method: 'teach' },
-      { name: 'MYOB', method: 'myob' }
-    ];
-
-    actions.forEach(({ name, method }) => {
-      const button = document.createElement('button');
-      button.textContent = name;
-      button.style.padding = '10px';
-      button.style.borderRadius = '5px';
-      button.style.border = '1px solid #ccc';
-      button.style.cursor = 'pointer';
-      button.onclick = async () => {
-        const action = pet[method]();
-        if (action) {
-          try {
-            // Just set the action - the animation system will handle the timing
-            await animator.setAction(action);
-          } catch (error) {
-            console.error('Error during action animation:', error);
-          }
-        }
-      };
-      buttonsDiv.appendChild(button);
-    });
-
-    // Update metrics display
-    function updateMetricsDisplay(metrics) {
-      const bars = [
-        { name: 'Hunger', value: metrics.hunger },
-        { name: 'Happiness', value: metrics.happiness },
-        { name: 'Energy', value: metrics.energy },
-        { name: 'Health', value: metrics.health },
-        { name: 'Love', value: metrics.love }
-      ];
-
-      metricsDiv.innerHTML = bars.map(bar => `
-        <div style="margin-bottom: 5px;">
-          <div style="display: flex; justify-content: space-between; margin-bottom: 2px;">
-            <span>${bar.name}</span>
-            <span>${Math.floor(bar.value)}%</span>
-          </div>
-          <div style="width: 100%; height: 10px; background: #eee; border-radius: 5px;">
-            <div style="width: ${bar.value}%; height: 100%; background: ${
-              bar.value > 60 ? '#4CAF50' : 
-              bar.value > 30 ? '#FFC107' : 
-              '#F44336'
-            }; border-radius: 5px;"></div>
-          </div>
-        </div>
-      `).join('') + `
-        <div style="margin-top: 10px; text-align: center;">
-          Age: ${Math.floor(metrics.age)} days
-        </div>
-      `;
-    }
-
-    // Listen for metric updates
-    window.addEventListener('pet-metrics-update', (event) => {
-      updateMetricsDisplay(event.detail);
-      animator.setEmotion(event.detail.emotion).catch(console.error);
-    });
-
-    // Initial metrics display
-    updateMetricsDisplay(pet.getMetrics());
-
-  } catch (error) {
-    console.error('Failed to initialize game:', error);
-  }
-}); 
+} 
